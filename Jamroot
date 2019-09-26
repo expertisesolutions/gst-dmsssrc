@@ -1,8 +1,14 @@
 
 project dmsssrc : default-build <link>shared ;
 
-lib dmsssrc : src/dmsssrc.cpp /boost//system /dahua-protocol//dahua-protocol
- /boost//coroutine /openssl//openssl /gst//gst : <cxxflags>-std=c++17 <link>shared
+local sources =
+  gstdmssdemux.c
+  gstdmssprotocol.c
+  gstdmsssrc.c
+  plugin.c
+ ;
+
+lib dmsssrc : src/$(sources) /gst//gst : <link>shared <define>VERSION=\\\"0.1\\\" <define>GST_LICENSE=\\\"LGPL\\\" <define>GST_PACKAGE_NAME=\\\"gstdmss\\\" <define>GST_PACKAGE_ORIGIN=\\\"Unknown\\\" <define>PACKAGE=\\\"gstdmss\\\"
  ;
 
 stage stage : dmsssrc ;
