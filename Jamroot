@@ -8,8 +8,8 @@ local sources =
   plugin.c
  ;
 
-lib dmsssrc : src/$(sources) /gst//gst : <link>shared <define>VERSION=\\\"0.1\\\" <define>GST_LICENSE=\\\"LGPL\\\" <define>GST_PACKAGE_NAME=\\\"gstdmss\\\" <define>GST_PACKAGE_ORIGIN=\\\"Unknown\\\" <define>PACKAGE=\\\"gstdmss\\\"
+lib gstdmss : src/$(sources) /gst//gst : <link>shared <define>VERSION=\\\"0.1\\\" <define>GST_LICENSE=\\\"LGPL\\\" <define>GST_PACKAGE_NAME=\\\"gstdmss\\\" <define>GST_PACKAGE_ORIGIN=\\\"Unknown\\\" <define>PACKAGE=\\\"gstdmss\\\"
  ;
 
-stage stage : dmsssrc ;
+stage stage : gstdmss ;
 

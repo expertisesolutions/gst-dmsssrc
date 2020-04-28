@@ -257,7 +257,7 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
         rate_num = 64000;
         break;
       default:
-        GST_ELEMENT_ERROR (demux, RESOURCE, READ, (NULL),
+        GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
             ("Unknown audio rate: %d", (int) rate));
         return;
     }
@@ -284,7 +284,7 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
             "stream-format", G_TYPE_STRING, "adts", NULL);
         break;
       default:
-        GST_ELEMENT_ERROR (demux, RESOURCE, READ, (NULL),
+        GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
             ("Unknown audio format: %d", (int) format));
         return;
     }
@@ -311,6 +311,9 @@ gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
   format = (value & 0xFF00) >> 8;
   if (format != demux->video_format) {
     switch (format) {
+      default:
+        GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
+            ("Unknown Video format: %d", (int) format));
       case GST_DMSS_VIDEO_H264:
         caps =
             gst_caps_new_simple ("video/x-h264", "stream-format",
@@ -323,9 +326,6 @@ gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
             G_TYPE_STRING, "byte-stream", "alignment",
             G_TYPE_STRING, "nal", NULL);
         break;
-      default:
-        GST_ELEMENT_ERROR (demux, RESOURCE, READ, (NULL),
-            ("Unknown Video format: %d", (int) format));
         return;
     }
 
