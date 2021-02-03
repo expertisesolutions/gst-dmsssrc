@@ -7,7 +7,13 @@ There are two plugins defined here:
 
 ---
 ## Build and Install
-The dependencies here are [gstreamer-1.0](https://gstreamer.freedesktop.org/), [meson](https://mesonbuild.com) and [ninja](https://ninja-build.org).
+The dependencies here are:
+- [meson](https://mesonbuild.com)
+- [ninja](https://ninja-build.org).
+- [gstreamer-1.0](https://gstreamer.freedesktop.org/)
+- [gst-libav](https://github.com/GStreamer/gst-libav)
+- [gstreamer-vaapi](https://github.com/GStreamer/gstreamer-vaapi)
+
 To build and install:
 ```
 meson build
@@ -39,10 +45,8 @@ Now to get the audio and video from **dmsssrc**, **dmssdemux** can be used as sh
 
 ``` 
 GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0 gst-launch-1.0 \
-  dmsssrc host=192.168.1.108 port=37777 user=admin password=admin channel=5 \
-  ! dmssdemux name=d \
-    d. ! audioconvert ! audioresample ! autoaudiosink \
-    d. ! videoconvert ! autovideosink
+  dmsssrc host=192.168.1.108 port=37777 user=admin password=admin channel=0 subchannel=1 \
+  ! dmssdemux ! queue ! decodebin ! videoconvert ! autovideosink
 ```
 
 ### More examples
