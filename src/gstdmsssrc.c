@@ -384,8 +384,8 @@ gst_dmss_src_create (GstPushSrc * psrc, GstBuffer ** outbuf)
           gst_dmss_receive_packet_no_body (src->stream_socket, src->cancellable,
               &err, prologue)) <= 0) {
     if (!err && !body_size)
-      g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-          "Read operation timed out");
+      g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
+          "Connection closed by remote peer");
     GST_LOG_OBJECT (src, "Error receiving header");
     g_assert (err != NULL);
     goto recv_error;
@@ -1009,8 +1009,8 @@ gst_dmss_receive_packet_no_body (GSocket * socket, GCancellable * cancellable,
     if ((size = g_socket_receive (socket, &buffer[offset],
                 buffer_size - offset, cancellable, err)) <= 0) {
       if (!*err && !size)
-        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-            "Read operation timed out");
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
+            "Connection closed by remote peer");
       goto recv_error;
     }
 

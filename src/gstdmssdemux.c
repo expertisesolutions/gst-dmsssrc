@@ -33,6 +33,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
 
 GST_DEBUG_CATEGORY_STATIC (dmssdemux_debug);
 #define GST_CAT_DEFAULT dmssdemux_debug
@@ -51,10 +52,13 @@ static const char DHAV_suffix[4] = {'d', 'h', 'a', 'v'};
 #define AUDIO_CAPS \
   GST_STATIC_CAPS (\
     "audio/x-alaw, " \
-      "rate = (int) [ 8000, 16000 ], channels = (int) [ 1, 2 ];" \
+      "rate = (int) [ 8000, 16000, 32000 ], channels = (int) [ 1, 2 ];" \
     "audio/x-mulaw, " \
-      "rate = [ 8000, 16000 ], channels = [ 1, 2 ];" \
+      "rate = (int) [ 8000, 16000, 32000 ], channels = (int) [ 1, 2 ];" \
     "audio/mpeg, " \
+      "rate = (int) [ 8000, 16000, 32000 ], channels = (int) [ 1, 2 ]," \
+      "framed = (boolean) false," \
+      "level = (string) 1," \
       "mpegversion = (int) 4, " \
       "stream-format = (string) adts; " \
 )
@@ -166,18 +170,15 @@ gst_dmss_demux_class_init (GstDmssDemuxClass * klass)
 }
 
 static gboolean
-gst_dmss_demux_push_event (GstDmssDemux * demux, GstEvent * event)
+gst_dmss_demux_audio_push_event (GstDmssDemux * demux, GstEvent * event)
 {
   gboolean res = FALSE;
 
-  if (demux->videosrcpad) {
-    gst_event_ref (event);
-    GST_LOG_OBJECT (demux, "Pushing event to videosrcpad");
-    res |= gst_pad_push_event (demux->videosrcpad, event);
-  }
-
   if (demux->audiosrcpad)
-    res |= gst_pad_push_event (demux->audiosrcpad, event);
+  {
+    GST_LOG_OBJECT (demux, "Pushing event to audiosrcpad");
+    res = gst_pad_push_event (demux->audiosrcpad, event);
+  }
   else {
     gst_event_unref (event);
     res = TRUE;
@@ -186,10 +187,41 @@ gst_dmss_demux_push_event (GstDmssDemux * demux, GstEvent * event)
   return res;
 }
 
+static gboolean
+gst_dmss_demux_video_push_event (GstDmssDemux * demux, GstEvent * event)
+{
+  gboolean res = FALSE;
+
+  if (demux->videosrcpad) {
+    GST_LOG_OBJECT (demux, "Pushing event to videosrcpad");
+    res = gst_pad_push_event (demux->videosrcpad, event);
+  }
+  else {
+    gst_event_unref (event);
+    res = TRUE;
+  }
+
+  return res;
+}
+
+static gboolean
+gst_dmss_demux_push_event (GstDmssDemux * demux, GstEvent * event)
+{
+  gboolean res = FALSE;
+
+  res = gst_dmss_demux_video_push_event (demux, gst_event_ref (event));
+  if (res)
+    res = gst_dmss_demux_audio_push_event (demux, event);
+
+  return res;
+}
+
 static void
 gst_dmss_demux_segment_init (GstDmssDemux * demux, GstClockTime timestamp)
 {
   GstEvent *event;
+
+  GST_DEBUG_OBJECT (demux, "segment init");
 
   gst_segment_init (&demux->time_segment, GST_FORMAT_TIME);
 
@@ -253,6 +285,12 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
       case GST_DMSS_AUDIO_16000:
         rate_num = 16000;
         break;
+      case GST_DMSS_AUDIO_32000:
+        rate_num = 32000;
+        break;
+      case GST_DMSS_AUDIO_48000:
+        rate_num = 48000;
+        break;
       case GST_DMSS_AUDIO_64000:
         rate_num = 64000;
         break;
@@ -264,24 +302,32 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
 
     switch (format) {
       case GST_DMSS_AUDIO_ALAW:
+        GST_DEBUG_OBJECT (demux, "Audio ALAW");
         caps =
             gst_caps_new_simple ("audio/x-alaw", "rate", G_TYPE_INT, rate_num,
             "channels", G_TYPE_INT, 1, NULL);
         break;
       case GST_DMSS_AUDIO_MULAW:
+        GST_DEBUG_OBJECT (demux, "Audio MULAW");
         caps =
             gst_caps_new_simple ("audio/x-mulaw", "rate", G_TYPE_INT,
             rate_num, "channels", G_TYPE_INT, 1, NULL);
         break;
       case GST_DMSS_AUDIO_G726:
+        GST_DEBUG_OBJECT (demux, "Audio G726");
         caps =
             gst_caps_new_simple ("audio/x-g726", "rate", G_TYPE_INT, rate_num,
             "channels", G_TYPE_INT, 1, NULL);
         break;
       case GST_DMSS_AUDIO_AAC:
+        GST_DEBUG_OBJECT (demux, "Audio AAC");
         caps =
-            gst_caps_new_simple ("audio/mpeg", "mpegversion", G_TYPE_INT, 4,
-            "stream-format", G_TYPE_STRING, "adts", NULL);
+          gst_caps_new_simple ("audio/mpeg", "rate", G_TYPE_INT, rate_num,
+            "framed", G_TYPE_BOOLEAN, 0,
+            "level", G_TYPE_STRING, "1",
+            "mpegversion", G_TYPE_INT, 4,
+            "stream-format", G_TYPE_STRING, "adts",
+            "channels", G_TYPE_INT, 1, NULL);
         break;
       default:
         GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
@@ -289,10 +335,10 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
         return;
     }
 
-    gst_dmss_demux_add_audio_pad (demux, caps);
-
     demux->audio_format = format;
     demux->audio_rate = rate;
+
+    gst_dmss_demux_add_audio_pad (demux, caps);
   }
 }
 
@@ -315,12 +361,14 @@ gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
         GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
             ("Unknown Video format: %d", (int) format));
       case GST_DMSS_VIDEO_H264:
+        GST_DEBUG_OBJECT (demux, "Video H264");
         caps =
             gst_caps_new_simple ("video/x-h264", "stream-format",
             G_TYPE_STRING, "byte-stream", "alignment",
             G_TYPE_STRING, "nal", NULL);
         break;
       case GST_DMSS_VIDEO_H265:
+        GST_DEBUG_OBJECT (demux, "Video H265");
         caps =
             gst_caps_new_simple ("video/x-h265", "stream-format",
             G_TYPE_STRING, "byte-stream", "alignment",
@@ -329,9 +377,9 @@ gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
         return;
     }
 
-    gst_dmss_demux_add_video_pad (demux, caps);
-
     demux->video_format = format;
+
+    gst_dmss_demux_add_video_pad (demux, caps);
   }
 }
 
@@ -344,7 +392,7 @@ gst_dmss_demux_parse_extended_header (GstDmssDemux * demux, gchar * header,
   guint32 copy32;               // because of alignment
 
   while (p != end && i != 32) {
-    /* GST_DEBUG ("reading extended header of %.02x", (unsigned int) (guint8) * p); */
+    GST_DEBUG ("reading extended header of %.02x", (unsigned int) (guint8) * p);
 
     if (end - p >= sizeof (guint32)) {
       memcpy (&copy32, p, sizeof (copy32));
@@ -355,7 +403,7 @@ gst_dmss_demux_parse_extended_header (GstDmssDemux * demux, gchar * header,
           ("Couldn't parse extended header correctly"));
       break;
     }
-    /* GST_DEBUG ("Value read for header %" G_GUINT64_FORMAT, extended_header[i]); */
+    GST_DEBUG ("Value read for header %" G_GUINT64_FORMAT, extended_header[i]);
     ++i;
   }
 }
@@ -363,12 +411,13 @@ gst_dmss_demux_parse_extended_header (GstDmssDemux * demux, gchar * header,
 static void
 gst_dmss_demux_flush (GstDmssDemux * demux)
 {
-  int const prologue_size = 32;
+  //int const prologue_size = 32;
   int const dhav_fixed_header_size = 24;
   int const dhav_epilogue_size = 8;
+  int const minimum_prefix_search = 32*1024;
   guint64 extended_header[32];
   gsize size;
-  GstBuffer *buffer;
+  GstBuffer *buffer = NULL;
   GstMapInfo map;
   guint8 dhav_packet_type;
   guint32 dhav_packet_size;
@@ -382,46 +431,69 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
   //GstClockTime absolute_timestamp;
   gboolean is_audio;
   gchar const *error_msg;
-  int start_offset;
+  int start_offset, mapped_size;
 
   size = gst_adapter_available (demux->adapter);
 
-  while (size >= prologue_size + minimum_dhav_size) {
-    /* GST_LOG_OBJECT (demux, "loop size %d", (int)size); */
+  while (size >= /*prologue_size +*/ minimum_dhav_size) {
+    GST_LOG_OBJECT (demux, "loop size %d", (int)size);
     prologue =
-        gst_adapter_map (demux->adapter, prologue_size + minimum_dhav_size);
+      gst_adapter_map (demux->adapter, /*prologue_size +*/ minimum_dhav_size);
     if (!prologue)
       goto adapter_map_error;
 
     start_offset = 0;
 
-    while ((prologue[prologue_size + start_offset + 0] != DHAV_prefix[0] ||
-            prologue[prologue_size + start_offset + 1] != DHAV_prefix[1] ||
-            prologue[prologue_size + start_offset + 2] != DHAV_prefix[2] ||
-            prologue[prologue_size + start_offset + 3] != DHAV_prefix[3]) &&
-        size != prologue_size + minimum_dhav_size + start_offset) {
-      /* GST_LOG_OBJECT (demux, "searching prefix"); */
-      ++start_offset;
+    if ((prologue[/*prologue_size +*/ 0] != DHAV_prefix[0] ||
+         prologue[/*prologue_size +*/ 1] != DHAV_prefix[1] ||
+         prologue[/*prologue_size +*/ 2] != DHAV_prefix[2] ||
+         prologue[/*prologue_size +*/ 3] != DHAV_prefix[3])) {
 
-      gst_adapter_unmap (demux->adapter);
-      prologue =
-          gst_adapter_map (demux->adapter,
-          prologue_size + minimum_dhav_size + start_offset);
-      if (!prologue) {
-        gst_adapter_flush (demux->adapter, start_offset);
-        goto adapter_map_error;
+      while (size - start_offset > /*prologue_size +*/ minimum_dhav_size &&
+             (prologue[/*prologue_size +*/ start_offset + 0] != DHAV_prefix[0] ||
+              prologue[/*prologue_size +*/ start_offset + 1] != DHAV_prefix[1] ||
+              prologue[/*prologue_size +*/ start_offset + 2] != DHAV_prefix[2] ||
+              prologue[/*prologue_size +*/ start_offset + 3] != DHAV_prefix[3])) {
+        GST_LOG_OBJECT (demux, "searching for prologue DHAV prefix (not found immediatelly)");
+        mapped_size = start_offset + minimum_prefix_search < size ? start_offset + minimum_prefix_search : size;
+        assert (mapped_size <= size);
+        assert (mapped_size >= /*prologue_size +*/ minimum_dhav_size);
+        
+        gst_adapter_unmap (demux->adapter);
+        GST_LOG_OBJECT (demux, "Remapping for %d size with %d offset", mapped_size, start_offset);
+        prologue = gst_adapter_map (demux->adapter, mapped_size);
+        if (!prologue) {
+          gst_adapter_flush (demux->adapter, start_offset);
+          goto adapter_map_error;
+        }
+
+        while (mapped_size - start_offset != /*prologue_size +*/ minimum_dhav_size && 
+               (prologue[/*prologue_size +*/ start_offset + 0] != DHAV_prefix[0] ||
+                prologue[/*prologue_size +*/ start_offset + 1] != DHAV_prefix[1] ||
+                prologue[/*prologue_size +*/ start_offset + 2] != DHAV_prefix[2] ||
+                prologue[/*prologue_size +*/ start_offset + 3] != DHAV_prefix[3]))
+          ++start_offset;
+
+        GST_LOG_OBJECT (demux, "searching for prologue DHAV prefix (discarding at least %d) mapped_size %d", start_offset, mapped_size);
       }
     }
+    else
+      GST_LOG_OBJECT (demux, "Prologue DHAV prefix found at %d", start_offset);
 
-    if (size == prologue_size + minimum_dhav_size + start_offset)
+    if ((prologue[/*prologue_size +*/ start_offset + 0] != DHAV_prefix[0] ||
+         prologue[/*prologue_size +*/ start_offset + 1] != DHAV_prefix[1] ||
+         prologue[/*prologue_size +*/ start_offset + 2] != DHAV_prefix[2] ||
+         prologue[/*prologue_size +*/ start_offset + 3] != DHAV_prefix[3]))
       goto prefix_error;
 
+    GST_LOG_OBJECT (demux, "Prologue DHAV prefix found at %d", start_offset);
+
     prologue += start_offset;
-    dhav_packet_type = prologue[prologue_size + 4];
+    dhav_packet_type = prologue[/*prologue_size +*/ 4];
 
     dhav_packet_size =
-        GUINT32_FROM_LE (*(guint32 *) & prologue[prologue_size + 12]);
-    dhav_head_size = *(unsigned char *) &prologue[prologue_size + 22];
+        GUINT32_FROM_LE (*(guint32 *) & prologue[/*prologue_size +*/ 12]);
+    dhav_head_size = *(unsigned char *) &prologue[/*prologue_size +*/ 22];
     dhav_body_size =
         dhav_packet_size - (dhav_fixed_header_size + dhav_epilogue_size +
         dhav_head_size);
@@ -429,15 +501,15 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
     gst_adapter_unmap (demux->adapter);
 
     if (start_offset) {
-      /* GST_DEBUG ("Packet didn't start at right offset. Skipped %d bytes", */
-      /*     start_offset); */
+      GST_DEBUG ("Packet didn't start at right offset. Skipped %d bytes",
+          start_offset);
       gst_adapter_flush (demux->adapter, start_offset);
     }
 
-    /* GST_DEBUG */
-    /*     ("DHAV packet (checking if downloaded) type: %.02x DHAV size: %d head size: %d body size: %d", */
-    /*     (int) dhav_packet_type, (int) dhav_packet_size, (int) dhav_head_size, */
-    /*     (int) dhav_body_size); */
+    GST_DEBUG
+        ("DHAV packet (checking if downloaded) type: %.02x DHAV size: %d head size: %d body size: %d",
+        (int) dhav_packet_type, (int) dhav_packet_size, (int) dhav_head_size,
+        (int) dhav_body_size);
 
     is_audio = (dhav_packet_type == (unsigned char) 0xf0);
 
@@ -448,49 +520,45 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
         dhav_packet_type != (unsigned char) 0xfc &&
         dhav_packet_type != (unsigned char) 0xfd) {
       /* discard packet */
-      GST_WARNING ("Discarding DHAV packet that is not video frame");
-      gst_adapter_flush (demux->adapter, dhav_packet_size + prologue_size);
+      GST_INFO ("Discarding DHAV packet that is not video frame");
+      gst_adapter_flush (demux->adapter, dhav_packet_size/* + prologue_size*/);
       size = gst_adapter_available (demux->adapter);
       continue;
     }
 
-    if (dhav_packet_size + prologue_size <= size) {
-      /* GST_DEBUG */
-      /*     ("DHAV packet fully downloaded (size downloaded: %d, packet size + prologue: %d)", */
-      /*     (int) size, (int) dhav_packet_size + prologue_size); */
-      buffer =
-          gst_adapter_take_buffer (demux->adapter,
-          dhav_packet_size + prologue_size);
+    if (dhav_packet_size/* + prologue_size*/ <= size) {
+      GST_DEBUG
+          ("DHAV packet (%X) fully downloaded (size downloaded: %d, packet size + prologue: %d)", (int)(unsigned char)dhav_packet_type,
+           (int) size, (int) dhav_packet_size/* + prologue_size*/);
+      assert (buffer == NULL);
+      buffer = gst_adapter_take_buffer_fast (demux->adapter, dhav_packet_size);
 
-      if (dhav_packet_type == (unsigned char) 0xfc)
-        GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT);
-        
       gst_buffer_map (buffer, &map, GST_MAP_READ);
 
-      if (map.data[prologue_size + dhav_packet_size - 8] != DHAV_suffix[0] ||
-          map.data[prologue_size + dhav_packet_size - 7] != DHAV_suffix[1] ||
-          map.data[prologue_size + dhav_packet_size - 6] != DHAV_suffix[2] ||
-          map.data[prologue_size + dhav_packet_size - 5] != DHAV_suffix[3]) {
+      if (map.data[/*prologue_size +*/ dhav_packet_size - 8] != DHAV_suffix[0] ||
+          map.data[/*prologue_size +*/ dhav_packet_size - 7] != DHAV_suffix[1] ||
+          map.data[/*prologue_size +*/ dhav_packet_size - 6] != DHAV_suffix[2] ||
+          map.data[/*prologue_size +*/ dhav_packet_size - 5] != DHAV_suffix[3]) {
         error_msg = "Packet doesn't end with dhav suffix";
         goto corrupted_error;
       }
 
-      if (GUINT32_FROM_LE (*(guint32 *) & map.data[prologue_size +
+      if (GUINT32_FROM_LE (*(guint32 *) & map.data[/*prologue_size +*/
                   dhav_packet_size - 4]) != dhav_packet_size) {
         error_msg = "Packet suffixed size doesn't match header packet size";
         goto corrupted_error;
       }
 
       frame_epoch =
-          GUINT16_FROM_LE (*(guint16 *) & prologue[prologue_size + 16]);
-      frame_ts = GUINT16_FROM_LE (*(guint16 *) & prologue[prologue_size + 20]);
+          GUINT16_FROM_LE (*(guint16 *) & prologue[/*prologue_size +*/ 16]);
+      frame_ts = GUINT16_FROM_LE (*(guint16 *) & prologue[/*prologue_size +*/ 20]);
 
       GST_INFO ("DHAV frame timing info epoch: %d timestamp: %d",
           (int) frame_epoch, (int) frame_ts);
 
       gst_dmss_demux_parse_extended_header (demux,
           (gchar *) map.data +
-          prologue_size +
+                                            /*prologue_size +*/
           dhav_fixed_header_size, dhav_head_size, extended_header);
 
       if (is_audio)
@@ -499,6 +567,13 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
         gst_dmss_demux_video_prepare_buffer (demux, buffer, extended_header);
 
       gst_buffer_unmap (buffer, &map);
+      buffer = gst_buffer_make_writable (buffer);
+
+      if (dhav_packet_type == (unsigned char) 0xfc)
+      {
+        GST_DEBUG ("Set delta flag for complete frame");
+        GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+      }
 
       // calculate PTS
       GST_BUFFER_TIMESTAMP (buffer) = gst_dmss_demux_calculate_pts (demux, frame_epoch, frame_ts);
@@ -510,65 +585,56 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
       /*     GST_TIME_ARGS (GST_BUFFER_TIMESTAMP (buffer)), */
       /*     GST_BUFFER_OFFSET (buffer), GST_BUFFER_OFFSET_END (buffer)); */
 
-      /* GST_DEBUG ("Resizing buffer to offset %d and size %d", */
-      /*     (int) prologue_size + dhav_head_size, (int) dhav_body_size); */
+      GST_DEBUG ("Resizing buffer to offset %d and size %d",
+          (int) /*prologue_size +*/ dhav_head_size, (int) dhav_body_size);
       gst_buffer_resize (buffer,
-          prologue_size + dhav_head_size +
+          /*prologue_size +*/ dhav_head_size +
           dhav_fixed_header_size, dhav_body_size);
+      GST_DEBUG ("Resized");
 
       if (is_audio) {
         if (demux->audiosrcpad) {
           /* GST_DEBUG ("pushed audio buffer"); */
+          GST_DEBUG_OBJECT (demux, "pushing audio buffer");
           gst_pad_push (demux->audiosrcpad, buffer);
+          GST_DEBUG_OBJECT (demux, "pushed audio buffer");
+          buffer = NULL;
         }
-      } else
-      /* { */
-        /* static int vframes = 0; */
-        /* char filename[256]; */
-        /* FILE* file; */
-        /* int size; */
-
-        /* sprintf(filename, "packet%d.dhav", vframes); */
-
-        /* file = fopen (filename, "wb"); */
-
-        /* size = gst_buffer_get_size (buffer); */
-        /* gst_buffer_map (buffer, &map, GST_MAP_READ); */
-        /* fwrite (map.data, sizeof(char), size, file); */
-
-        /* GST_LOG_OBJECT (demux, "video frame number %d of size %d", vframes, (int)size); */
-        
-        /* fclose (file); */
-        /* gst_buffer_unmap (buffer, &map); */
-        
-        
+        else {
+          GST_DEBUG_OBJECT (demux, "no audio pad, discarding buffer");
+          gst_buffer_unref(buffer);
+          buffer = NULL;
+        }
+      } else {
+        GST_DEBUG_OBJECT (demux, "pushing video buffer");
         gst_pad_push (demux->videosrcpad, buffer);
-
-      /*   ++vframes; */
-      /* } */
-
-      demux->waiting_dhav_end = FALSE;
+        GST_DEBUG_OBJECT (demux, "pushed video buffer");
+        buffer = NULL;
+      }
+      
       size = gst_adapter_available (demux->adapter);
     } else {
-      demux->waiting_dhav_end = TRUE;
-      /* GST_DEBUG ("Needs to download more to complete DHAV packet"); */
+      /* demux->waiting_dhav_end = TRUE; */
+      GST_DEBUG ("Needs to download more to complete DHAV packet");
+      buffer = NULL;
       break;
     }
   }
 
   return;
 prefix_error:
-  GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
+  GST_ELEMENT_INFO (demux, RESOURCE, READ, (NULL),
       ("DHAV packet doesn't start with the correct bytes"));
   gst_adapter_unmap (demux->adapter);
   gst_adapter_clear (demux->adapter);
   return;
 corrupted_error:
-  GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
+  GST_ELEMENT_INFO (demux, RESOURCE, READ, (NULL),
       ("DHAV packet is corrupted: %s", error_msg));
   gst_object_unref (buffer);
   gst_buffer_unmap (buffer, &map);
   gst_adapter_clear (demux->adapter);
+  return;
 adapter_map_error:
   GST_ELEMENT_ERROR (demux, RESOURCE, READ, (NULL),
       ("Error mapping buffer with gst_adapter_map"));
@@ -715,7 +781,7 @@ gst_dmss_demux_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
         /*     GST_TIME_FORMAT " max %" GST_TIME_FORMAT, */
         /*     GST_TIME_ARGS (min), GST_TIME_ARGS (max)); */
 
-        GST_WARNING_OBJECT (demux, "Our latency: min %" GST_TIME_FORMAT
+        GST_LOG_OBJECT (demux, "Our latency: min %" GST_TIME_FORMAT
             ", max %" GST_TIME_FORMAT,
                             GST_TIME_ARGS (demux->latency*GST_MSECOND), GST_TIME_ARGS (demux->latency*GST_MSECOND));
 
@@ -827,21 +893,23 @@ gst_dmss_demux_add_video_pad (GstDmssDemux * demux, GstCaps * caps)
   GstEvent *event;
   gchar *stream_id;
 
+  GST_DEBUG_OBJECT (demux, "add video pad");
+  
   stream_id =
-      gst_pad_create_stream_id (demux->videosrcpad,
+    gst_pad_create_stream_id (demux->videosrcpad,
       GST_ELEMENT_CAST (demux), "video");
   event = gst_event_new_stream_start (stream_id);
 
-  gst_pad_push_event (demux->videosrcpad, event);
+  gst_dmss_demux_video_push_event (demux, event);
   g_free (stream_id);
 
   gst_pad_set_caps (demux->videosrcpad, caps);
 
   if (!demux->need_segment) {
     event = gst_event_new_segment (&demux->time_segment);
-    gst_dmss_demux_push_event (demux, event);
+    gst_dmss_demux_video_push_event (demux, event);
   }
-
+  
   return demux->videosrcpad;
 }
 
@@ -851,6 +919,8 @@ gst_dmss_demux_add_audio_pad (GstDmssDemux * demux, GstCaps * caps)
   GstEvent *event;
   gchar *stream_id;
 
+  GST_DEBUG_OBJECT (demux, "add audio pad");
+  
   demux->audiosrcpad =
       gst_pad_new_from_static_template (&audio_template,
       audio_template.name_template);
@@ -869,16 +939,16 @@ gst_dmss_demux_add_audio_pad (GstDmssDemux * demux, GstCaps * caps)
 
   event = gst_event_new_stream_start (stream_id);
 
-  gst_pad_push_event (demux->audiosrcpad, event);
+  gst_dmss_demux_audio_push_event (demux, event);
   g_free (stream_id);
-
+  
   gst_pad_set_caps (demux->audiosrcpad, caps);
 
   gst_element_add_pad (GST_ELEMENT (demux), demux->audiosrcpad);
 
   if (!demux->need_segment) {
     event = gst_event_new_segment (&demux->time_segment);
-    gst_dmss_demux_push_event (demux, event);
+    gst_dmss_demux_audio_push_event (demux, event);
   }
 
   return demux->audiosrcpad;
@@ -895,87 +965,33 @@ gst_dmss_demux_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   GstMapInfo map;
   gssize body_size;
   int const prologue_size = 32;
-  int const minimum_dhav_packet_size = 24 + 8;
-  guint8 dhav_packet_type;
-  //guint32 dhav_packet_size;
-  //guint32 dhav_head_size;
-  //guint32 dhav_body_size;
   GstBuffer *outbuf;
-  gboolean is_video, is_audio;
 
+  if (gst_buffer_get_size(buffer) < prologue_size)
+    return GST_FLOW_OK;  
+  
   gst_buffer_map (buffer, &map, GST_MAP_READ);
 
-  /* GST_DEBUG ("buffer received with command %.02x", (unsigned char) map.data[0]); */
+  GST_DEBUG ("buffer received with command %.02x", (unsigned char) map.data[0]);
   if (((unsigned char *) map.data)[0] == (unsigned char) 0xbc) {
     body_size = GUINT32_FROM_LE (*(guint32 *) & map.data[4]);
-    /* GST_DEBUG ("buffer received with DHAV payload size %d", (int) body_size); */
+    GST_DEBUG ("buffer received with DHAV payload size %d", (int) body_size);
 
     if (!body_size)
       goto discard_mapped_buffer;
 
-    if (demux->waiting_dhav_end) {
-      gst_buffer_unmap (buffer, &map);
+    gst_buffer_unmap (buffer, &map);
 
-      outbuf = gst_buffer_make_writable (buffer);
-      gst_buffer_resize (outbuf, prologue_size,
-          gst_buffer_get_size (outbuf) - prologue_size);
+    outbuf = gst_buffer_make_writable (buffer);
+    gst_buffer_resize (outbuf, prologue_size,
+                       gst_buffer_get_size (outbuf) - prologue_size);
+    gst_adapter_push (demux->adapter, outbuf);
 
-      gst_adapter_push (demux->adapter, outbuf);
+    gst_dmss_demux_flush (demux);
 
-      gst_dmss_demux_flush (demux);
-
-      return GST_FLOW_OK;
-    } else {
-      if (body_size < minimum_dhav_packet_size)
-        goto discard_mapped_buffer;
-
-      if (map.data[prologue_size + 0] == DHAV_prefix[0] &&
-          map.data[prologue_size + 1] == DHAV_prefix[1] &&
-          map.data[prologue_size + 2] == DHAV_prefix[2] &&
-          map.data[prologue_size + 3] == DHAV_prefix[3]) {
-        dhav_packet_type = map.data[prologue_size + 4];
-
-        //dhav_packet_size = GST_READ_UINT32_LE (&map.data[prologue_size + 12]);
-        //dhav_head_size = *(unsigned char *) &map.data[prologue_size + 22];
-        //dhav_body_size = dhav_packet_size - (24 + 8 + dhav_head_size);
-
-        /* GST_DEBUG_OBJECT */
-        /*     (demux, "DHAV packet (start) type: %.02" G_GUINT32_FORMAT " DHAV " */
-        /*     "size: %" G_GUINT32_FORMAT " head size: %" G_GUINT32_FORMAT */
-        /*     " body size: %" G_GUINT32_FORMAT, (guint32) dhav_packet_type, */
-        /*     dhav_packet_size, dhav_head_size, dhav_body_size); */
-
-        gst_buffer_unmap (buffer, &map);
-
-        // We've got a video frame
-        is_video = (dhav_packet_type == (unsigned char) 0xfc ||
-            dhav_packet_type == (unsigned char) 0xfd);
-
-        is_audio = (dhav_packet_type == (unsigned char) 0xf0);
-
-        if (is_video || is_audio) {
-          gst_adapter_push (demux->adapter, buffer);
-
-          demux->waiting_dhav_end = TRUE;
-
-          gst_dmss_demux_flush (demux);
-
-          return GST_FLOW_OK;
-        } else {
-          /* GST_DEBUG ("Not a video or audio frame, discarding"); */
-          gst_buffer_unref (buffer);
-          return GST_FLOW_OK;
-        }
-      } else {
-        GST_ERROR ("Buffer doesn't contain one or more DHAV packet");
-        gst_buffer_unmap (buffer, &map);
-        gst_buffer_unref (buffer);
-        return GST_FLOW_OK;
-      }
-    }
+    return GST_FLOW_OK;
   } else {
     gst_buffer_unmap (buffer, &map);
-    gst_buffer_unref (buffer);
   }
 
   return GST_FLOW_OK;
