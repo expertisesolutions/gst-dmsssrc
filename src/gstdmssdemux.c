@@ -90,9 +90,9 @@ G_DEFINE_TYPE (GstDmssDemux, gst_dmss_demux, GST_TYPE_ELEMENT);
 static void gst_dmss_demux_finalize (GObject * object);
 
 static GstPad *gst_dmss_demux_add_audio_pad (GstDmssDemux * demux,
-    GstCaps * caps);
+                                             GstCaps * caps, GstClockTime frame_ts);
 static GstPad *gst_dmss_demux_add_video_pad (GstDmssDemux * demux,
-    GstCaps * caps);
+                                             GstCaps * caps, GstClockTime frame_ts);
 
 /* query functions */
 static gboolean gst_dmss_demux_src_query (GstPad * pad,
@@ -118,7 +118,7 @@ static gboolean gst_dmss_demux_sink_activate (GstPad * sinkpad,
 static GstStateChangeReturn gst_dmss_demux_change_state (GstElement * element,
     GstStateChange transition);
 static GstClockTime gst_dmss_demux_calculate_pts (GstDmssDemux *demux,
-    guint16 frame_epoch, guint16 frame_ts);
+    guint16 frame_epoch, guint16 frame_ts, gboolean is_audio);
 
 static void gst_dmss_demux_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
@@ -221,13 +221,15 @@ gst_dmss_demux_segment_init (GstDmssDemux * demux, GstClockTime timestamp)
 {
   GstEvent *event;
 
-  GST_DEBUG_OBJECT (demux, "segment init");
+  GST_DEBUG_OBJECT (demux, "segment init with timestamp base %" GST_TIME_FORMAT, GST_TIME_ARGS(timestamp));
 
   gst_segment_init (&demux->time_segment, GST_FORMAT_TIME);
 
   demux->time_segment.start = demux->time_segment.position = timestamp;
 
   event = gst_event_new_segment (&demux->time_segment);
+  if (demux->segment_seqnum)
+    gst_event_set_seqnum (event, demux->segment_seqnum);
   gst_dmss_demux_push_event (demux, event);
   demux->need_segment = FALSE;
 }
@@ -262,7 +264,7 @@ gst_dmss_demux_find_extended_header_value (guint8 prefix,
 
 static void
 gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
-    guint64 extended_header[32])
+                                     guint64 extended_header[32], GstClockTime frame_ts)
 {
   GstDmssAudioFormat format;
   GstDmssAudioRate rate;
@@ -274,11 +276,12 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
       gst_dmss_demux_find_extended_header_value
       (DMSS_EXTENDED_HEADER_AUDIOINFO_PREFIX, extended_header);
 
-  format = (value & 0xFF00) >> 8;
-  rate = value & 0xFF;
-  if (!demux->audiosrcpad && (format != demux->audio_format
-          || rate != demux->audio_rate)) {
-    switch (rate) {
+  if (value != -1) {
+    format = (value & 0xFF00) >> 8;
+    rate = value & 0xFF;
+    if (!demux->audiosrcpad && (format != demux->audio_format
+            || rate != demux->audio_rate)) {
+      switch (rate) {
       case GST_DMSS_AUDIO_8000:
         rate_num = 8000;
         break;
@@ -296,11 +299,11 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
         break;
       default:
         GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
-            ("Unknown audio rate: %d", (int) rate));
+              ("Unknown audio rate: %d", (int) rate));
         return;
-    }
+      }
 
-    switch (format) {
+      switch (format) {
       case GST_DMSS_AUDIO_ALAW:
         GST_DEBUG_OBJECT (demux, "Audio ALAW");
         caps =
@@ -333,18 +336,19 @@ gst_dmss_demux_audio_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
         GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
             ("Unknown audio format: %d", (int) format));
         return;
+      }
+
+      demux->audio_format = format;
+      demux->audio_rate = rate;
+
+      gst_dmss_demux_add_audio_pad (demux, caps, frame_ts);
     }
-
-    demux->audio_format = format;
-    demux->audio_rate = rate;
-
-    gst_dmss_demux_add_audio_pad (demux, caps);
   }
 }
 
 static void
 gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
-    guint64 extended_header[32])
+                                     guint64 extended_header[32], GstClockTime frame_ts)
 {
   GstDmssVideoFormat format;
   guint32 value;
@@ -354,12 +358,14 @@ gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
       gst_dmss_demux_find_extended_header_value
       (DMSS_EXTENDED_HEADER_VIDEOINFO_PREFIX, extended_header);
 
-  format = (value & 0xFF00) >> 8;
-  if (format != demux->video_format) {
-    switch (format) {
+  if (value != -1) {
+    format = (value & 0xFF00) >> 8;
+    if (format != demux->video_format) {
+      switch (format) {
       default:
         GST_ELEMENT_WARNING (demux, RESOURCE, READ, (NULL),
             ("Unknown Video format: %d", (int) format));
+        return;
       case GST_DMSS_VIDEO_H264:
         GST_DEBUG_OBJECT (demux, "Video H264");
         caps =
@@ -374,12 +380,14 @@ gst_dmss_demux_video_prepare_buffer (GstDmssDemux * demux, GstBuffer * buffer,
             G_TYPE_STRING, "byte-stream", "alignment",
             G_TYPE_STRING, "nal", NULL);
         break;
-        return;
+      }
+
+      if (demux->video_format != format) {
+        demux->video_format = format;
+
+        gst_dmss_demux_add_video_pad (demux, caps, frame_ts);
+      }
     }
-
-    demux->video_format = format;
-
-    gst_dmss_demux_add_video_pad (demux, caps);
   }
 }
 
@@ -436,7 +444,7 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
   size = gst_adapter_available (demux->adapter);
 
   while (size >= /*prologue_size +*/ minimum_dhav_size) {
-    GST_LOG_OBJECT (demux, "loop size %d", (int)size);
+    GST_INFO_OBJECT (demux, "loop size %d", (int)size);
     prologue =
       gst_adapter_map (demux->adapter, /*prologue_size +*/ minimum_dhav_size);
     if (!prologue)
@@ -448,7 +456,7 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
          prologue[/*prologue_size +*/ 1] != DHAV_prefix[1] ||
          prologue[/*prologue_size +*/ 2] != DHAV_prefix[2] ||
          prologue[/*prologue_size +*/ 3] != DHAV_prefix[3])) {
-
+      GST_WARNING_OBJECT (demux, "Out of sync on data received");
       while (size - start_offset > /*prologue_size +*/ minimum_dhav_size &&
              (prologue[/*prologue_size +*/ start_offset + 0] != DHAV_prefix[0] ||
               prologue[/*prologue_size +*/ start_offset + 1] != DHAV_prefix[1] ||
@@ -498,6 +506,8 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
         dhav_packet_size - (dhav_fixed_header_size + dhav_epilogue_size +
         dhav_head_size);
 
+    GST_INFO("byte after head size: %d", (int) *(unsigned char *) &prologue[/*prologue_size +*/ 23]);
+    
     gst_adapter_unmap (demux->adapter);
 
     if (start_offset) {
@@ -511,26 +521,28 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
         (int) dhav_packet_type, (int) dhav_packet_size, (int) dhav_head_size,
         (int) dhav_body_size);
 
-    is_audio = (dhav_packet_type == (unsigned char) 0xf0);
-
-    if (is_audio)
-      GST_INFO ("DHAV audio packet");
-
-    if (!is_audio &&
-        dhav_packet_type != (unsigned char) 0xfc &&
-        dhav_packet_type != (unsigned char) 0xfd) {
-      /* discard packet */
-      GST_INFO ("Discarding DHAV packet that is not video frame");
-      gst_adapter_flush (demux->adapter, dhav_packet_size/* + prologue_size*/);
-      size = gst_adapter_available (demux->adapter);
-      continue;
-    }
-
     if (dhav_packet_size/* + prologue_size*/ <= size) {
-      GST_DEBUG
+      is_audio = (dhav_packet_type == (unsigned char) 0xf0);
+
+      if (is_audio)
+        GST_INFO ("DHAV audio packet");
+
+      if (!is_audio && (
+          dhav_packet_type != (unsigned char) 0xfc &&
+          dhav_packet_type != (unsigned char) 0xfd /*&&
+                                                     dhav_packet_type != (unsigned char) 0xf1*/)) {
+        /* discard packet */
+        GST_INFO ("Discarding DHAV packet that is not video frame type: %d", (int)(unsigned int)dhav_packet_type);
+        gst_adapter_flush (demux->adapter, dhav_packet_size/* + prologue_size*/);
+        size = gst_adapter_available (demux->adapter);
+        continue;
+      }
+
+      GST_INFO
           ("DHAV packet (%X) fully downloaded (size downloaded: %d, packet size + prologue: %d)", (int)(unsigned char)dhav_packet_type,
            (int) size, (int) dhav_packet_size/* + prologue_size*/);
       assert (buffer == NULL);
+
       buffer = gst_adapter_take_buffer_fast (demux->adapter, dhav_packet_size);
 
       gst_buffer_map (buffer, &map, GST_MAP_READ);
@@ -552,6 +564,7 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
       frame_epoch =
           GUINT16_FROM_LE (*(guint16 *) & prologue[/*prologue_size +*/ 16]);
       frame_ts = GUINT16_FROM_LE (*(guint16 *) & prologue[/*prologue_size +*/ 20]);
+      //uint16_t xx = GUINT16_FROM_LE (*(guint16 *) & prologue[/*prologue_size +*/ 20]);
 
       GST_INFO ("DHAV frame timing info epoch: %d timestamp: %d",
           (int) frame_epoch, (int) frame_ts);
@@ -561,22 +574,29 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
                                             /*prologue_size +*/
           dhav_fixed_header_size, dhav_head_size, extended_header);
 
+      GstClockTime pts;
+
+      pts = gst_dmss_demux_calculate_pts (demux, frame_epoch, frame_ts
+                                          , !is_audio);
+      GST_INFO ("DHAV frame timing info epoch: %d timestamp: %d pts: %" GST_TIME_FORMAT,
+                 (int) frame_epoch, (int) frame_ts, GST_TIME_ARGS(pts));
+      
       if (is_audio)
-        gst_dmss_demux_audio_prepare_buffer (demux, buffer, extended_header);
-      else
-        gst_dmss_demux_video_prepare_buffer (demux, buffer, extended_header);
+        gst_dmss_demux_audio_prepare_buffer (demux, buffer, extended_header, pts);
+      else if (!is_audio)
+        gst_dmss_demux_video_prepare_buffer (demux, buffer, extended_header, pts);
 
       gst_buffer_unmap (buffer, &map);
       buffer = gst_buffer_make_writable (buffer);
 
-      if (dhav_packet_type == (unsigned char) 0xfc)
+      if (dhav_packet_type == (unsigned char) 0xfd)
       {
         GST_DEBUG ("Set delta flag for complete frame");
         GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT);
       }
 
       // calculate PTS
-      GST_BUFFER_TIMESTAMP (buffer) = gst_dmss_demux_calculate_pts (demux, frame_epoch, frame_ts);
+      GST_BUFFER_TIMESTAMP (buffer) = pts;
 
       /* GST_LOG_OBJECT (demux, */
       /*     "%s buffer of size %" G_GSIZE_FORMAT ", ts %" GST_TIME_FORMAT */
@@ -595,7 +615,7 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
       if (is_audio) {
         if (demux->audiosrcpad) {
           /* GST_DEBUG ("pushed audio buffer"); */
-          GST_DEBUG_OBJECT (demux, "pushing audio buffer");
+          GST_INFO_OBJECT (demux, "pushing audio buffer");
           gst_pad_push (demux->audiosrcpad, buffer);
           GST_DEBUG_OBJECT (demux, "pushed audio buffer");
           buffer = NULL;
@@ -606,8 +626,15 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
           buffer = NULL;
         }
       } else {
-        GST_DEBUG_OBJECT (demux, "pushing video buffer");
-        gst_pad_push (demux->videosrcpad, buffer);
+        static int i = 0;
+        static GstClockTime last = 0;
+        if (!last) last = gst_clock_get_time(gst_system_clock_obtain());
+        GstClockTime now = gst_clock_get_time(gst_system_clock_obtain());
+        GST_INFO_OBJECT (demux, "pushing video buffer %d diff (time )%dms", ++i, (int)((now - last)/(1000*1000)));
+        last = now;
+        if (gst_pad_push (demux->videosrcpad, buffer) != GST_FLOW_OK) {
+          GST_ERROR_OBJECT (demux, "Error pushing buffer to video pad");
+        }
         GST_DEBUG_OBJECT (demux, "pushed video buffer");
         buffer = NULL;
       }
@@ -621,6 +648,7 @@ gst_dmss_demux_flush (GstDmssDemux * demux)
     }
   }
 
+  GST_INFO_OBJECT (demux, "Return from flush");
   return;
 prefix_error:
   GST_ELEMENT_INFO (demux, RESOURCE, READ, (NULL),
@@ -654,6 +682,7 @@ gst_dmss_demux_init (GstDmssDemux * demux)
   demux->audiosrcpad = NULL;
   demux->adapter = gst_adapter_new ();
   demux->need_segment = TRUE;
+  demux->segment_seqnum = 0;
   demux->audio_format = GST_DMSS_AUDIO_FORMAT_UNKNOWN;
   demux->video_format = GST_DMSS_VIDEO_FORMAT_UNKNOWN;
   demux->latency = DMSS_DEFAULT_LATENCY;
@@ -856,12 +885,14 @@ gst_dmss_demux_handle_sink_event (GstPad * pad, GstObject * parent,
 
       gst_event_parse_segment (event, &segment);
       if (segment->format == GST_FORMAT_BYTES) {
+        GST_ERROR_OBJECT (pad, "segment format requested is bytes");
         /* gst_segment_copy_into (segment, &demux->byte_segment); */
-        /* demux->need_segment = TRUE; */
-        /* demux->segment_seqnum = gst_event_get_seqnum (event); */
+        demux->need_segment = TRUE;
+        demux->segment_seqnum = gst_event_get_seqnum (event);
 
         gst_event_unref (event);
       } else {
+        GST_ERROR_OBJECT (pad, "segment format requested is %d", (int)segment->format);
         gst_event_unref (event);
         /* cannot accept this format */
         res = FALSE;
@@ -888,7 +919,7 @@ gst_dmss_demux_handle_sink_event (GstPad * pad, GstObject * parent,
 }
 
 static GstPad *
-gst_dmss_demux_add_video_pad (GstDmssDemux * demux, GstCaps * caps)
+gst_dmss_demux_add_video_pad (GstDmssDemux * demux, GstCaps * caps, GstClockTime frame_ts)
 {
   GstEvent *event;
   gchar *stream_id;
@@ -906,15 +937,16 @@ gst_dmss_demux_add_video_pad (GstDmssDemux * demux, GstCaps * caps)
   gst_pad_set_caps (demux->videosrcpad, caps);
 
   if (!demux->need_segment) {
-    event = gst_event_new_segment (&demux->time_segment);
-    gst_dmss_demux_video_push_event (demux, event);
+    /* event = gst_event_new_segment (&demux->time_segment); */
+    /* gst_dmss_demux_video_push_event (demux, event); */
+    gst_dmss_demux_segment_init (demux, frame_ts);
   }
   
   return demux->videosrcpad;
 }
 
 static GstPad *
-gst_dmss_demux_add_audio_pad (GstDmssDemux * demux, GstCaps * caps)
+gst_dmss_demux_add_audio_pad (GstDmssDemux * demux, GstCaps * caps, GstClockTime frame_ts)
 {
   GstEvent *event;
   gchar *stream_id;
@@ -947,8 +979,9 @@ gst_dmss_demux_add_audio_pad (GstDmssDemux * demux, GstCaps * caps)
   gst_element_add_pad (GST_ELEMENT (demux), demux->audiosrcpad);
 
   if (!demux->need_segment) {
-    event = gst_event_new_segment (&demux->time_segment);
-    gst_dmss_demux_audio_push_event (demux, event);
+    gst_dmss_demux_segment_init (demux, frame_ts);
+    /* event = gst_event_new_segment (&demux->time_segment); */
+    /* gst_dmss_demux_audio_push_event (demux, event); */
   }
 
   return demux->audiosrcpad;
@@ -1048,18 +1081,101 @@ void gst_dmss_demux_resync (GstDmssDemux *demux, guint16 frame_epoch, guint16 fr
     GstClockTime send_base_time, GstClockTime timestamp)
 {
   demux->base_time = current_time;
-  demux->last_ts = frame_ts;
+  demux->video_last_ts = demux->audio_last_ts = frame_ts;
 
   demux->send_base_time = send_base_time;
-  demux->last_timestamp = timestamp;
+  demux->audio_timestamp_window.last_timestamp =demux->video_timestamp_window.last_timestamp = timestamp;
 }
 
-GstClockTime gst_dmss_demux_calculate_pts (GstDmssDemux *demux, guint16 frame_epoch, guint16 frame_ts)
+static void gst_dmss_demux_calculate_timestamp_average (GstDmssDemux *demux, struct gst_dmss_demux_timestamp_window *window,
+                                                        int diff_ts, GstClockTime current_time, GstClockTime *timestamp)
+{
+  //current_time
+  if (window->current_window_size == GST_DEMUX_TIMESTAMP_WINDOW_SIZE) {
+    GstClockTime rel_current_time = current_time - window->timestamp_abs_base;
+    GST_DEBUG_OBJECT (demux, "adding diff %ld", rel_current_time);
+    window->timestamp_window_total -= window->timestamp_window[GST_DEMUX_TIMESTAMP_WINDOW_SIZE-1];
+    //window->timestamp_abs_base += window->timestamp_window[GST_DEMUX_TIMESTAMP_WINDOW_SIZE-1];
+    window->timestamp_abs_base = current_time;
+    memmove (&window->timestamp_window[1], &window->timestamp_window[0],
+             (GST_DEMUX_TIMESTAMP_WINDOW_SIZE-1) * sizeof(window->timestamp_window[0]));
+    window->timestamp_window_total += rel_current_time;
+    window->timestamp_window[0] = rel_current_time;
+    *timestamp = (window->timestamp_window_total / window->current_window_size);
+    GST_DEBUG_OBJECT (demux, "(moved) total window: %ld average: %ld size: %d (tms)new_diff_ts: %ld",
+                      window->timestamp_window_total, (window->timestamp_window_total / window->current_window_size),
+                      window->current_window_size, (*timestamp/ (1000*1000)));
+    *timestamp += window->last_timestamp;
+    window->last_timestamp = *timestamp;
+  }
+  //else if (demux->current_window_size
+  else /*if (diff_ts != 0 || demux->current_video_window_size)*/ {
+    /* if (!demux->current_video_window_size) { */
+    /*   window->timestamp_window_total += diff_ts; */
+    /*   window->timestamp_window[0] = 0; */
+    /*   demux->current_video_window_size++; */
+    /* } */
+    window->diff_timestamp_window_total += diff_ts;
+    memmove (&window->diff_timestamp_window[1], &window->diff_timestamp_window[0],
+             window->current_window_size * sizeof(window->diff_timestamp_window[0]));
+    memmove (&window->timestamp_window[1], &window->timestamp_window[0],
+             window->current_window_size * sizeof(window->timestamp_window[0]));
+    window->diff_timestamp_window[0] = diff_ts;
+    if (window->current_window_size) {
+      window->timestamp_window[0] = current_time - window->timestamp_abs_base;
+    }
+    else {
+      window->timestamp_window[0] = 0;
+    }
+    window->timestamp_abs_base = current_time;
+    window->timestamp_window_total += window->timestamp_window[0];
+    window->current_window_size++;
+    diff_ts = window->diff_timestamp_window_total / window->current_window_size;
+    GST_DEBUG_OBJECT (demux, "total window: %d average: %d size: %d new_diff_ts: %d",
+                      (int)window->diff_timestamp_window_total, (int)(window->diff_timestamp_window_total / window->current_window_size),
+                      window->current_window_size, (int)diff_ts);
+    *timestamp = (window->timestamp_window_total / window->current_window_size); // will be overwritten, just for printing
+    GST_DEBUG_OBJECT (demux, "(ifbytime) total window: %ld average: %ld size: %d (tms)new_diff_ts: %ld",
+                      window->timestamp_window_total, (window->timestamp_window_total / window->current_window_size),
+                      window->current_window_size, (*timestamp / (1000*1000)));
+    *timestamp = window->last_timestamp;
+    *timestamp += (guint64) diff_ts * GST_MSECOND;
+    window->last_timestamp = *timestamp;
+  }
+}
+
+static GstClockTime gst_dmss_demux_diff_ts (GstDmssDemux *demux, guint16 frame_epoch, guint16 frame_ts,
+                                            guint16 *last_ts)
+{
+  guint16 ring_diff_ts, reverse_ring_diff_ts/*, old_latency*/;
+  ring_diff_ts = frame_ts - *last_ts;
+  reverse_ring_diff_ts = *last_ts - frame_ts;
+
+  GST_DEBUG_OBJECT (demux, "ring_diff_ts %d reverse_ring_diff_ts %d",
+                    ring_diff_ts, reverse_ring_diff_ts);
+
+  if (ring_diff_ts <= 1000) {
+    *last_ts = frame_ts;
+    return ring_diff_ts;
+  }
+  else if (reverse_ring_diff_ts <= 1000)
+    // going back in time (audio frames, likely)
+    //diff_ts = -(int) reverse_ring_diff_ts;
+    return 0;
+  else
+  {
+    GST_ERROR_OBJECT (demux, "Should resync last_ts %d frame_ts %d", (int)*last_ts, (int)frame_ts);
+
+    return 0;
+  }
+}
+
+static GstClockTime gst_dmss_demux_calculate_pts (GstDmssDemux *demux, guint16 frame_epoch, guint16 frame_ts
+                                           , gboolean is_video)
 {
   GstClockTime current_time;
   GstClockTime timestamp/*, send_base_time = demux->send_base_time*/;
   GstClockTime timestamp_recv, timestamp_send/*, latency*//*, delta_latency*/;
-  guint16 ring_diff_ts, reverse_ring_diff_ts/*, old_latency*/;
   int diff_ts;
   
   if (!demux->pipeline_clock)
@@ -1084,36 +1200,10 @@ GstClockTime gst_dmss_demux_calculate_pts (GstDmssDemux *demux, guint16 frame_ep
   }
   
   // ts are in milliseconds
-  {
-    ring_diff_ts = frame_ts - demux->last_ts;
-    reverse_ring_diff_ts = demux->last_ts - frame_ts;
+  diff_ts = gst_dmss_demux_diff_ts (demux, frame_epoch, frame_ts, is_video ? &demux->video_last_ts : &demux->audio_last_ts);
 
-    GST_DEBUG_OBJECT (demux, "ring_diff_ts %d reverse_ring_diff_ts %d",
-                      ring_diff_ts, reverse_ring_diff_ts);
-    
-    if (ring_diff_ts <= 1000)
-      diff_ts = ring_diff_ts;
-    else if (reverse_ring_diff_ts <= 1000)
-      // going back in time (audio frames, likely)
-      //diff_ts = -(int) reverse_ring_diff_ts;
-      diff_ts = 0;
-    else
-    {
-      GST_ERROR_OBJECT (demux, "Should resync last_ts %d frame_ts %d", (int)demux->last_ts, (int)frame_ts);
-
-      timestamp = frame_epoch;
-      timestamp *= GST_SECOND;
-      // The rest of the division is used here to avoid negative timestamp
-      timestamp += (((guint64) frame_ts) % 1000) * GST_MSECOND;
-
-      gst_dmss_demux_resync (demux, frame_epoch, frame_ts, demux->base_time,
-          timestamp - (current_time - demux->base_time), timestamp);
-      diff_ts = frame_ts - demux->last_ts;
-    }
-    
-    timestamp = demux->last_timestamp;
-    timestamp += (guint64) diff_ts * GST_MSECOND;
-  }
+  gst_dmss_demux_calculate_timestamp_average(demux, is_video ? &demux->video_timestamp_window : &demux->audio_timestamp_window
+                                             , diff_ts, current_time, &timestamp);
 
   /* if (timestamp < demux->send_base_time) */
   /*   timestamp_send = 0; */
@@ -1122,15 +1212,15 @@ GstClockTime gst_dmss_demux_calculate_pts (GstDmssDemux *demux, guint16 frame_ep
   timestamp_send = timestamp;
   timestamp_recv = current_time - demux->base_time;
 
-  GST_DEBUG ("timestamp_recv: %" GST_TIME_FORMAT
+  GST_DEBUG ("new_diff_ts %d timestamp_recv: %" GST_TIME_FORMAT
              " timestamp_send: %" GST_TIME_FORMAT
-             " arrived (before) %s%" GST_TIME_FORMAT,
+             " arrived (before) %s%" GST_TIME_FORMAT, diff_ts,
              GST_TIME_ARGS(timestamp_recv),
              GST_TIME_ARGS(timestamp_send),
              (timestamp_recv <= timestamp_send ? "" : "-"),
-             GST_TIME_ARGS(timestamp_send < timestamp_recv
-                           ? timestamp_recv - timestamp_send 
-                           : timestamp_send - timestamp_recv));
+             GST_TIME_ARGS(((timestamp_send - demux->send_base_time) < timestamp_recv
+                            ? timestamp_recv - (timestamp_send - demux->send_base_time)
+                            : (timestamp_send - demux->send_base_time) - timestamp_recv)));
 
   GST_DEBUG
     ("Current time in pipeline %" GST_TIME_FORMAT
@@ -1141,9 +1231,6 @@ GstClockTime gst_dmss_demux_calculate_pts (GstDmssDemux *demux, guint16 frame_ep
      , GST_TIME_ARGS(demux->latency*GST_MSECOND)
      );
 
-  demux->last_ts = frame_ts;
-  demux->last_timestamp = timestamp_send;
-  
   return timestamp_send;
 }
 

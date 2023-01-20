@@ -355,7 +355,7 @@ gst_dmss_src_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
   src = GST_DMSS_SRC (psrc);
 
-  GST_LOG_OBJECT (src, "Going to read data from stream");
+  GST_INFO_OBJECT (src, "Going to read data from stream");
   
   current_time = gst_clock_get_time (src->system_clock);
 
@@ -369,7 +369,7 @@ gst_dmss_src_create (GstPushSrc * psrc, GstBuffer ** outbuf)
     src->last_ack_time = current_time;
 
 #if 1
-    GST_LOG_OBJECT (src, "Download rate of %d Bps", src->bytes_downloaded);
+    GST_INFO_OBJECT (src, "Download rate of %d Bps", src->bytes_downloaded);
     src->bytes_downloaded = 0;
 #endif
   }
@@ -379,23 +379,23 @@ gst_dmss_src_create (GstPushSrc * psrc, GstBuffer ** outbuf)
   if (!GST_OBJECT_FLAG_IS_SET (src, GST_DMSS_SRC_CONTROL_OPEN))
     goto wrong_state;
 
-  GST_LOG_OBJECT (src, "Receiving data from socket with blocking");
+  GST_INFO_OBJECT (src, "Receiving data from socket with blocking");
   if ((body_size =
           gst_dmss_receive_packet_no_body (src->stream_socket, src->cancellable,
               &err, prologue)) <= 0) {
     if (!err && !body_size)
       g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
           "Connection closed by remote peer");
-    GST_LOG_OBJECT (src, "Error receiving header");
+    GST_ERROR_OBJECT (src, "Error receiving header");
     g_assert (err != NULL);
     goto recv_error;
   }
-  GST_LOG_OBJECT (src, "Received header");
+  GST_INFO_OBJECT (src, "Received header");
 
-  g_assert (body_size == GUINT32_FROM_LE (*(guint32 *) & prologue[4]));
+  g_assert (body_size == GUINT16_FROM_LE (*(guint32 *) & prologue[4]));
 
   //gst_dmss_debug_print_prologue(prologue);
-  GST_DEBUG_OBJECT (src,
+  GST_INFO_OBJECT (src,
       "Received prologue packet with command %.02x. body size %d",
       (unsigned int) (unsigned char) prologue[0], (int) body_size);
 
@@ -409,28 +409,28 @@ gst_dmss_src_create (GstPushSrc * psrc, GstBuffer ** outbuf)
 
   offset = 0;
   do {
-    GST_LOG_OBJECT (src, "Receiving data from socket with blocking");
+    GST_INFO_OBJECT (src, "Receiving data from socket with blocking (2)");
     if ((size =
             g_socket_receive (src->stream_socket,
                 (gchar *) & map.data[offset + sizeof (prologue)],
                 body_size - offset, src->cancellable, &err)) <= 0) {
-      GST_LOG_OBJECT (src, "Error receiving header");
+      GST_ERROR_OBJECT (src, "Error receiving header");
       if (!err && !size)
         g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
             "Read operation timed out");
       g_assert (err != NULL);
       goto recv_error;
     }
-    GST_LOG_OBJECT (src, "Received partial body");
+    GST_INFO_OBJECT (src, "Received partial body");
     offset += size;
   } while (offset != body_size);
 
-  GST_DEBUG_OBJECT (src, "Received body with %d", (int) offset);
+  GST_INFO_OBJECT (src, "Received body with %d", (int) offset);
 
   gst_buffer_unmap (*outbuf, &map);
   gst_buffer_resize (*outbuf, 0, sizeof (prologue) + body_size);
 
-  GST_LOG_OBJECT (src,
+  GST_INFO_OBJECT (src,
       "Returning buffer from _get of size %" G_GSIZE_FORMAT ", ts %"
       GST_TIME_FORMAT ", dur %" GST_TIME_FORMAT
       ", offset %" G_GINT64_FORMAT ", offset_end %" G_GINT64_FORMAT
@@ -1006,19 +1006,22 @@ gst_dmss_receive_packet_no_body (GSocket * socket, GCancellable * cancellable,
   g_assert (err != NULL);
   offset = 0;
   do {
+    GST_INFO ("Called receive %d bytes available", (int)g_socket_get_available_bytes (socket));
     if ((size = g_socket_receive (socket, &buffer[offset],
                 buffer_size - offset, cancellable, err)) <= 0) {
+      GST_INFO ("Return receive with error");
       if (!*err && !size)
         g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
             "Connection closed by remote peer");
       goto recv_error;
     }
+    GST_INFO ("Return receive with success size %d received", (int)size);
 
     offset += size;
   }
   while (offset != buffer_size);
 
-  body_size = GUINT32_FROM_LE (*(guint32 *) & buffer[4]);
+  body_size = GUINT16_FROM_LE (*(guint16 *) & buffer[4]);
   return body_size;             // body size
 recv_error:
   return -1;

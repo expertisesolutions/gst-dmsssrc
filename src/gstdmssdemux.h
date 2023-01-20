@@ -74,6 +74,18 @@ enum GstDmssAudioRate
   GST_DMSS_AUDIO_UNKNOWN = 0x1FF
 };
 
+#define GST_DEMUX_TIMESTAMP_WINDOW_SIZE 100
+
+struct gst_dmss_demux_timestamp_window {
+  guint32 diff_timestamp_window[GST_DEMUX_TIMESTAMP_WINDOW_SIZE];
+  guint32 diff_timestamp_window_total;
+  GstClockTime timestamp_abs_base;
+  GstClockTime timestamp_window_total;
+  GstClockTime timestamp_window[GST_DEMUX_TIMESTAMP_WINDOW_SIZE];
+  int current_window_size;
+  GstClockTime last_timestamp;
+};
+
 struct _GstDmssDemux
 {
   GstElement element;
@@ -93,8 +105,7 @@ struct _GstDmssDemux
 
   GstAdapter *adapter;
   gboolean waiting_dhav_end;
-  guint16 last_ts;
-  GstClockTime last_timestamp;
+  guint16 video_last_ts, audio_last_ts;
 
   GstClockTime latency; // should not use this anymore, but avg latency or something else
 
@@ -103,6 +114,7 @@ struct _GstDmssDemux
   GstClockTime base_time;
   // gboolean need_resync;
 
+  struct gst_dmss_demux_timestamp_window video_timestamp_window, audio_timestamp_window;
   // int samples;
   // GstClockTime last_latency;
   // GstClockTime avg_latency;
